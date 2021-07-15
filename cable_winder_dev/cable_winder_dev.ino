@@ -4,11 +4,9 @@
     Will move winder a number of turns based on input to run command.
     Will move the guide back and fourth at a speed relative to the winder based on the wind pitch setting.
     Guide direction reverses when target upper and lower limits are reached.
-    When reversing there are two hysteresis settings.
-    First the winder will keep moving and the guide will stop for winderHysteresis steps,
-    then the winder will stop and the guide will move for guideHysteresis steps.
-    Values passed to and returned from methods are in millimeteres, revolutions, and seconds for easier user interface.
-    Values are stored in the class variables in steps and seconds for easier position control.
+    After reversing guide direction the winder stops until the guide has moved a distance to compensate for any hysteresis in the winding position vs guide movement.
+    winder class keeps values to control movement in units of steps and seconds for easy control of stepper motor
+    values passed to and returned from methods are in millimeteres, revolutions, and seconds for easier user interface
 */
 
 // Include the AccelStepper library:
@@ -17,24 +15,23 @@
 #define MotorInterfaceType 4
 
 // set constants
-const int MaxWinderSpeed = 1000;
-const int MaxGuideSpeed = 1000;
+const int MaxWinderSpeed = 1000; // in steps per second 
+const int MaxGuideSpeed = 1000;  //in steps per second 
 const int StepsPerRev = 200;
 const float LeadScrewPitch = 2.0; // movement of traveling nut per revolution of lead screw, in mm
-const float SpoolWidth = 14.8; // width of spool in mm
+const float SpoolWidth = 16.8; // width of spool in mm
 const long SpoolStepWidth = SpoolWidth * StepsPerRev / LeadScrewPitch; // width of spool in steps on guide stepper motor
 const float GuidePositionHysteresis = 2.0; // default distance to move just the guide when reversing directions in mm
-const float WinderTurnHysteresis = 0.5; // default revolutions to move just the winder when reversing directions
-const float InitialWindPitch = 0.4; // movement of guide per revolution of winder, in mm
-const float InitialSpeed = 0.3; // initial winer speed in revolutions per second
+const long GuideStepHysteresis = GuidePositionHysteresis * StepsPerRev / LeadScrewPitch; // in steps
+const float InitialWindPitch = 0.75; // movement of guide per revolution of winder, in mm
+const float InitialSpeed = 0.5; // initial winer speed in revolutions per second
 
 // note that these constants are also a bitmap of which steppers are moving, 0x1 is guide and 0x2 is winder
 const int MODE_STOPPED = 0; // neither stepper running
 const int MODE_GUIDE = 1; // guide motor is running
 const int MODE_WINDER = 2; // winder motor running
 const int MODE_WINDING = 3; // both motors running to wind cable
-const int MODE_REVERSING_GUIDE = 5; // move the guide but not the winder to change directions
-const int MODE_REVERSING_WINDER = 6; // move the winder but not the guide to change directions
+const int MODE_REVERSING = 5; // move the guide but not the winder to change directions
 
 class cableWinder
 {
@@ -44,16 +41,13 @@ class cableWinder
     // user adjusted settings and defaults
     float guideToWinderStepRatio = 0.5; // windPitch/LeadScrewPitch;
     float winderSpeed = InitialSpeed * StepsPerRev; // in steps/second
-    float guideSpeed = winderSpeed * guideToWinderStepRatio;
+    float guideSpeed; // winderSpeed*guideToWinderStepRatio
     int outputsEnabled = MODE_STOPPED;
     long guideLowerLimit = 0;
-    long guideHysteresis = GuidePositionHysteresis * StepsPerRev / LeadScrewPitch; // in steps
-    long winderHysteresis = WinderTurnHysteresis * StepsPerRev; // in steps
-    long guideUpperLimit = SpoolStepWidth + guideHysteresis;
+    long guideHysteresis = GuideStepHysteresis;
+    long guideUpperLimit = SpoolStepWidth + GuideStepHysteresis;
     long guideTargetPosition; // only used when repositioning guide
-    long winderReversePosition; // only used when winding at reverse point 
     int runMode = MODE_STOPPED;
-    int resumeMode = MODE_STOPPED; // set this mode when resuming from a pause
     // trying without resume mode by simply starting in reversing mode when resuming
     //    int resumeMode = MODE_STOPPED; // if set to MODE_REVERSING or MODE_WINGING then when winder resumes in this mode
 
@@ -70,15 +64,18 @@ class cableWinder
     float getGuidePosition() {
       return guideStepper->currentPosition() * LeadScrewPitch / StepsPerRev;
     }; // get current guide posiiton in mm
+    float getWinderPosition() {
+      return winderStepper->currentPosition() / StepsPerRev;
+    }; // get current winder position in Revs
     void haltSteppers();
     void pauseSteppers() {
-      resumeMode = runMode;
+      //      resumeMode = runMode;
       runMode = MODE_STOPPED;
     };
     void calcSpeed() {
       guideSpeed = ((guideSpeed > 0.0f) ? 1 : -1) * abs(winderSpeed) * guideToWinderStepRatio;
     }; // recalcualte guide speed based on winder speed and ratio
-    ; // recalculate guide speed
+    // recalculate guide speed
     void displaySettings();
     void onLoop(); // executes any required run calls for steppers, call this in loop as often as possible
     void setSpoolWidth(float width);
@@ -101,17 +98,11 @@ class cableWinder
     float getWindPitch() {
       return (guideToWinderStepRatio * LeadScrewPitch);
     };
-    void setGuideHysteresis(float comp) {
+    void setHysteresis(float comp) {
       guideHysteresis = comp * StepsPerRev / LeadScrewPitch;
       calcLimit();
     };
-    float getWinderHysteresis() {
-      return winderHysteresis / StepsPerRev;
-    };
-    void setWinderHysteresis(float comp) {
-      winderHysteresis = comp * StepsPerRev;
-    };
-    float getGuideHysteresis() {
+    float getHysteresis() {
       return guideHysteresis * LeadScrewPitch / StepsPerRev;
     };
     int getMode() {
@@ -122,9 +113,6 @@ class cableWinder
       else if (dir > 0) guideSpeed = abs(guideSpeed);
       else guideSpeed = -abs(guideSpeed);
     }; // set the direction the guide is moving, positive is to right, negative is to left, 0 reverses
-    void setResumeMode(int modeIn) {
-      resumeMode = modeIn;
-    };
 };
 
 /* pins for MotorInterfaceType = 4 (FULL4WIRE)
@@ -151,52 +139,47 @@ void cableWinder::onLoop() {
       runMode = MODE_STOPPED;
     }
   }
-
+  
   // check if guide direction needs to be reversed
   if ((runMode == MODE_WINDING) // only do this when in winding mode
       && ((guideStepper->currentPosition() <= guideLowerLimit && guideSpeed < 0.0f) // moving past lower limit
           || (guideStepper->currentPosition() >= guideUpperLimit && guideSpeed > 0.0f))) { // moving past upper limit
     // reverse direction
     guideSpeed = -guideSpeed;
-    Serial.print(F("Setting guide speed to "));
+    /*Serial.print(F("Setting guide speed to "));
     Serial.print(guideSpeed);
-    Serial.println(F("Steps per second."));
+    Serial.println(F("Steps per second."));*/
     guideStepper->setSpeed(guideSpeed);
-    runMode = MODE_REVERSING_WINDER;
-    Serial.println(F("Reversing direction, turning winder without moving guide."));
-    winderReversePosition=winderStepper->currentPosition(); // save current position to track reversal movement
+    runMode = MODE_REVERSING;
+    Serial.println(F("Reversing guide direction."));
+
   }
 
-  // check if winder only movement is complete when reversiong
-  if ((runMode == MODE_REVERSING_WINDER) && // check if winder movement hysteresis compensation is complete after reversing
-      (abs(winderStepper->currentPosition()-winderReversePosition) >= winderHysteresis)) { // finished winder only movement
-    runMode = MODE_REVERSING_GUIDE;
-    Serial.println(F("Completed winder only reversal movement. Now performing guide only movement."));
-  }
-
-
-  
-  // check if guide only movement is complete when reversing
-  if ((runMode == MODE_REVERSING_GUIDE) && // check if guide movement hysteresis compensation is complete after reversing
+  // check if hysteresis compensation movement is complete when reversiong
+  if ((runMode == MODE_REVERSING) && // check if guide movement hysteresis compensation is complete after reversing
       ((guideStepper->currentPosition() <= guideUpperLimit - guideHysteresis && guideSpeed < 0.0f) // finished hystersis from upper limit reverse
        || (guideStepper->currentPosition() >= guideLowerLimit + guideHysteresis && guideSpeed > 0.0f))) { // finished hystersis from lower limit reverse
     runMode = MODE_WINDING;
-    Serial.println(F("Completed guide only reversal movement. Direction reversal complete."));
+    Serial.println(F("Completed guide hysteresis compensation movement."));
   }
-
+  
   // check if only moving guide and that movement is complete
   if ((runMode == MODE_GUIDE) && // check if guide only movement complete
       ((guideStepper->currentPosition() <= guideTargetPosition && guideSpeed < 0.0f) // decreasing past goal
        || (guideStepper->currentPosition() >= guideTargetPosition && guideSpeed > 0.0f))) { // increasing past goal
     runMode = MODE_STOPPED;
-    Serial.println(F("Completed guide positioning movement."));
+    Serial.println(F("Completed guide movement."));
   }
 
   // for steppers that should be moving, run them at speed
-  if (runMode & MODE_GUIDE) 
-    guideStepper->runSpeed();  
-  if (runMode & MODE_WINDER) 
-    winderStepper->runSpeed();
+  if (runMode & MODE_GUIDE) {
+    guideStepper->runSpeed();  //Serial.println(F("Stepping guide."));
+//    else Serial.println(F("Not stepping guide."));
+  }
+  if (runMode & MODE_WINDER) { 
+    winderStepper->runSpeed(); // Serial.println(F("Stepping winder."));
+//    else Serial.println(F("Not stepping winder."));
+  }
 }
 
 void cableWinder::windCable(float distance = 0.0f) {
@@ -212,12 +195,9 @@ void cableWinder::windCable(float distance = 0.0f) {
     if (distance < 0.0f) winderSpeed = -abs(winderSpeed); // set winder to unwind
     else winderSpeed = abs(winderSpeed); // set winder to wind
     runMode = MODE_WINDING; // starting a fresh wind with both steppers
-  } else {
-    Serial.print(F("Resuming winding for "));
-    Serial.print(-winderStepper->currentPosition()/StepsPerRev);
-    Serial.println(F(" turns."));
-    runMode = resumeMode;
-  }
+  } else // start in reverse mode, onLoop will correct this condition if necessary before stepping motor anyway
+    runMode = MODE_REVERSING;
+
   // Enable outputs
   winderStepper->enableOutputs();
   guideStepper->enableOutputs();
@@ -225,13 +205,13 @@ void cableWinder::windCable(float distance = 0.0f) {
 
   // set speeds
   calcSpeed(); // make sure guide speed is right
-/*  Serial.print(F("Setting winder speed to "));
+  Serial.print(F("Setting winder speed to "));
   Serial.print(winderSpeed);
-  Serial.println(F(" steps per second."));*/
+  Serial.println(F(" steps per second."));
   winderStepper->setSpeed(winderSpeed);
-/*  Serial.print(F("Setting guide speed to "));
+  Serial.print(F("Setting guide speed to "));
   Serial.print(guideSpeed);
-  Serial.println(F(" steps per second."));*/
+  Serial.println(F(" steps per second."));
   guideStepper->setSpeed(guideSpeed);
 
 }
@@ -296,17 +276,19 @@ void cableWinder::displaySettings()
     case MODE_WINDER    : Serial.println(F(" moving winder only.")); break;
     case MODE_GUIDE     : Serial.println(F(" moving guide only.")); break;
     case MODE_WINDING   : Serial.println(F(" winding cable.")); break;
-    case MODE_REVERSING_GUIDE : Serial.println(F(" reversing with guide moving only.")); break;
-    case MODE_REVERSING_WINDER : Serial.println(F(" reversing winder moving only.")); break;
+    case MODE_REVERSING : Serial.println(F(" reversing guide direction.")); break;
   }
-  Serial.print(F("Current guide posision is "));
+  Serial.print(F("Current guide position is "));
   Serial.print(getGuidePosition());
+  Serial.println(F(" mm."));
+  Serial.print(F("Current winder position is (in turns left to target): "));
+  Serial.print(getWinderPosition());
   Serial.println(F(" mm."));
   Serial.print(F("Guide lower limit: "));
   Serial.print(guideLowerLimit);
   Serial.println(F(" mm."));
   Serial.print(F("Guide upper limit: "));
-  Serial.print(guideUpperLimit * LeadScrewPitch / StepsPerRev);
+  Serial.print(guideUpperLimit*LeadScrewPitch/StepsPerRev);
   Serial.println(F(" mm."));
 
 }
@@ -316,8 +298,8 @@ int WinderPins[8] = {4, 5, 6, 7, 8, 9, 10, 11}; // pins for cable winder
 cableWinder *winder;
 
 
-void displayMenu() {
-
+void displayMenu(){
+  
   if (Serial)
   {
     Serial.println(F("Welcome to the cable winder!"));
@@ -328,12 +310,11 @@ void displayMenu() {
     Serial.println(F("P          : Change the wind pitch (input:float) mm per revolution."));
     Serial.println(F("H          : Halt the winder."));
     Serial.println(F("C          : Set the guide movement hysteresis compensation distance to (input:float) mm."));
-    Serial.println(F("W          : Set the reversal winder only movement to (input:float) turns."));
     Serial.println(F("O          : Set the current guide position to (input:float) in mm from left most limit."));
     Serial.println(F("D          : Set the current guide movement direction to (input:int), positive for moving right, negative for moving left, zero to reverse."));
     Serial.println(F("?          : Display current settings."));
   }
-
+  
 }
 
 
@@ -352,7 +333,7 @@ void setup() {
 }
 
 // check incomming serial for commands
-void parseSerial() {
+void parseSerial(){
 
   while (Serial.available()) {
     char arg = Serial.read();
@@ -387,9 +368,9 @@ void parseSerial() {
         break;
 
       case 'C' : // set hysteresis compensation
-        winder->setGuideHysteresis(Serial.parseFloat());
+        winder->setHysteresis(Serial.parseFloat());
         Serial.print(F("Guide hysteresis compensation set to "));
-        Serial.print(winder->getGuideHysteresis());
+        Serial.print(winder->getHysteresis());
         Serial.print(F(" mm."));
         winder->displaySettings();
         break;
@@ -407,14 +388,6 @@ void parseSerial() {
         Serial.print(F("Guide speed set to "));
         Serial.print(winder->getGuideSpeed());
         Serial.print(F(" revolustions/second."));
-        winder->displaySettings();
-        break;
-
-      case 'W' : // change guide direction
-        winder->setWinderHysteresis(Serial.parseFloat());
-        Serial.print(F("Winder reversal windings to "));
-        Serial.print(winder->getWinderHysteresis());
-        Serial.print(F(" turns."));
         winder->displaySettings();
         break;
 
